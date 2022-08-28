@@ -1,4 +1,5 @@
 import random
+import difflib
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -7,87 +8,9 @@ from sqlalchemy.sql import func
 from . import models
 
 
-# HELPERS #
-
-def _get_all_sketches(db: Session) -> list[str]:
-    """Return list of every sketch in the show"""
-    return [
-        sketch.segment for sketch in
-        (db.query(models.Script.segment)
-                   .distinct(models.Script.segment)
-                   .filter(models.Script.segment.isnot(None)))
-    ]
-
-
-def _get_formatted_sketch_body(
-    sketch: dict, detailed: bool = False
-) -> list[dict[str, str]]:
-    """Return lines of a sketch in detailed or default view"""
-    if detailed:
-        return [  # Breaks up each line's info.
-            {
-                "type": line.type,
-                "actor": line.actor,
-                "character": line.character,
-                "detail": line.detail
-            }
-            for line in sketch
-        ]
-    else:
-        return [  # Condense into one line depending on dialogue or direction.
-            f"{line.character}: {line.detail}"
-            if (line.type == "Dialogue") else
-            f"*{line.detail}*"
-            for line in sketch
-        ]
-
-
-def _get_episode_sketch(db: Session, episode: int) -> list[str]:
-    """Returns a list of sketches from an episode"""
-    return [
-        sketch.segment for sketch in
-        (db.query(models.Script.segment)
-                   .filter_by(episode=episode)
-                   .distinct(models.Script.segment))
-    ]
-
-
-# MAIN FUNCTIONS #
-
-def get_sketch(
-    db: Session, sketch: str|None = None, detailed: bool = False
-) -> dict[str, str|list[str]]:
-    """Return a sketch's lines and directions.
-        
-    Args:
-        sketch: Include name of sketch.
-        detailed: View more details of each line of sketch.
-
-    Returns:
-        dict: The lines and info of a particular sketch.
-    
-    Raises:
-        HTTPException: Searched-for sketch does not exist.
-
-    """
-    # Query random sketch if no sketch is provided.
-    choice: str|None = sketch
-    if choice is None:
-        sketches: list[str] = _get_all_sketches(db)
-        choice = random.choice(sketches)
-    sketch = db.query(models.Script).filter(models.Script.segment.like(choice))
-
-    # Sketch doesn't exist.
-    if not sketch.first():
-        raise HTTPException(status_code=404, detail="Sketch not found")
-    
-    return {
-        "sketch": sketch.first().segment,
-        "episode": sketch.first().episode,
-        "episode_name": sketch.first().episode_name,
-        "body": _get_formatted_sketch_body(sketch, detailed=detailed)
-    }
-
+###############################################################################
+# QUOTES
+###############################################################################
 
 def get_random_quote(
     db: Session, actor: str|None = None, episode: int|None = None,
@@ -130,6 +53,88 @@ def get_random_quote(
     }
 
 
+###############################################################################
+# PEOPLE
+###############################################################################
+
+def get_actors(db: Session) -> list[str]:
+    """Return a list of actors from the show"""
+    return [
+        actor.actor for actor in
+        (
+            db.query(models.Script.actor)
+            .filter(models.Script.actor.isnot(None))
+            .group_by(models.Script.actor)
+            .order_by(func.count(models.Script.detail).desc())
+        )
+        
+    ]
+
+
+def get_characters(db: Session) -> list[str]:
+    """Return a list of characters played in the show"""
+    return [
+        character.character for character in
+        (
+            db.query(models.Script.character)
+              .filter(models.Script.character.isnot(None))
+              .group_by(models.Script.character)
+              .order_by(func.count(models.Script.detail).desc())
+        )
+    ]
+
+###############################################################################
+# SKETCHES
+###############################################################################
+
+# MAIN FUNCTIONS
+
+def get_sketch(
+    db: Session, sketch: str|None = None, detailed: bool = False
+) -> dict[str, str|list[str]]:
+    """Return a sketch's lines and directions.
+        
+    Args:
+        sketch: Include name of sketch.
+        detailed: View more details of each line of sketch.
+
+    Returns:
+        dict: The lines and info of a particular sketch.
+    
+    Raises:
+        HTTPException: Searched-for sketch does not exist.
+
+    """
+    choice: str|None = sketch
+
+    # Query random sketch if no sketch is provided.
+    sketches: list[str] = get_all_sketches(db)
+    if choice is None:
+        choice = random.choice(sketches)
+    
+    # Get closest matching sketch.
+    else:
+        NUM_MATCHES_ALLOWED: int = 1
+        CUTOFF: float = 0.5
+        closest_match = difflib.get_close_matches(
+            choice, sketches, NUM_MATCHES_ALLOWED, CUTOFF)
+        if closest_match:
+            choice = closest_match[0]
+    
+    sketch = db.query(models.Script).filter(models.Script.segment.like(choice))
+
+    # Sketch doesn't exist.
+    if not sketch.first():
+        raise HTTPException(status_code=404, detail="Sketch not found")
+    
+    return {
+        "sketch": sketch.first().segment,
+        "episode": sketch.first().episode,
+        "episode_name": sketch.first().episode_name,
+        "body": get_formatted_sketch_body(sketch, detailed=detailed)
+    }
+
+
 def get_episode(
     db: Session, number: int|None = None, detailed: bool = False
 ) -> dict[str, str|list[dict[str, str|list[str]]]]:
@@ -160,7 +165,8 @@ def get_episode(
     if not query.first():
         raise HTTPException(status_code=404, detail="Episode not found")
     
-    sketches: list[str] = _get_episode_sketch(db, number)
+    episode_name = query.first().episode_name
+    sketches: list[str] = get_episode_sketches(db, number)
     body: list[dict[str, str|list[str]]] = []
 
     # Body will be separated by sketches, with each sketch including its lines;
@@ -180,7 +186,7 @@ def get_episode(
         body.append(
             {
                 "sketch": sketch_name,
-                "lines": _get_formatted_sketch_body(sketch, detailed=detailed)
+                "lines": get_formatted_sketch_body(sketch, detailed=detailed)
             }
         )
     
@@ -191,45 +197,109 @@ def get_episode(
     }
 
 
-# TODO: options: list of sketches or nested sketches.
-def get_nested_sketches(
-    db: Session, season: int|None = None,
-    episode: int|None = None
+def get_nested_seasons(
+    db: Session, season: int|None = None
 ) -> dict[str: dict[str, list[str]]]:
     """Return nested sketches based on their season and episode.
     
     Args:
-        season: TODO
-        episode: TODO
+        season: Select from seasons 1 to 4.
+        episode: Select a specific episode number from a particular season.
     
     Returns:
         dict: The show's hierarchy in season->episode->sketch form.
     
+    Raises:
+        HTTPException: Season or episode # passed in was not valid.
+    
     """
+    if season:
+        if season not in [1, 2, 3, 4]:
+            raise HTTPException(status_code=404, detail="Season not found")
+        return get_nested_season_sketches(db, season)
+    
+    all_season_sketches = {}
+    for season in [1, 2, 3, 4]:
+        all_season_sketches.update(get_nested_season_sketches(db, season))
+    return all_season_sketches
+
+
+# HELPERS
+
+def get_all_sketches(db: Session, season: int|None = None) -> list[str]:
+    """Return list of every sketch in the show, optional from a season"""
+    base_query = (db.query(models.Script.segment)
+                  .distinct(models.Script.segment)
+                  .filter(models.Script.segment.isnot(None)))
+    
+    if season:  # Filter only sketches from the season.
+        if season not in [1, 2, 3, 4]:
+            raise HTTPException(status_code=404, detail="Season out of range")
+        
+        # Fetch sketches that fall into the episodes from the season.
+        lower = models.Script.season_ranges[season - 1][0]
+        upper = models.Script.season_ranges[season - 1][-1]
+        base_query = base_query.filter(
+            models.Script.episode.between(lower, upper))
+    
+    return [sketch.segment for sketch in base_query]
+
+
+def get_episode_sketches(db: Session, episode: int) -> list[str]:
+    """Returns a list of sketches from an episode"""
+    if episode < 1 or episode > 45:
+        raise HTTPException(status_code=404, detail="Episode out of range")
+
+    return [
+        sketch.segment for sketch in
+        (db.query(models.Script.segment)
+                   .filter_by(episode=episode)
+                   .distinct(models.Script.segment)
+                   .filter(models.Script.segment.isnot(None)))
+    ]
+
+
+def get_nested_episode_sketches(
+    db: Session, episode: int
+) -> dict[str, list[str]]:
+    """Return sketches from a particular episode"""
     return {
-        "season_1": {
-            f"episode_{ep}": [
-                sketch for sketch in
-                _get_episode_sketch(db, ep)
-            ] for ep in range(1, 14)
-        },
-        "season_2": {
-            f"episode_{ep}": [
-                sketch for sketch in
-                _get_episode_sketch(db, ep)
-            ] for ep in range(14, 27)
-        },
-        "season_3": {
-            f"episode_{ep}": [
-                sketch for sketch in
-                _get_episode_sketch(db, ep)
-            ] for ep in range(27, 40)
-        },
-        "season_4": {
-            f"episode_{ep}": [
-                sketch for sketch in
-                _get_episode_sketch(db, ep)
-            ] for ep in range(40, 46)
-        },
+        f"episode_{episode}": [
+            sketch for sketch in
+            get_episode_sketches(db, episode)
+        ]
     }
+
+
+def get_nested_season_sketches(db: Session, season: int) -> list[str]:
+    """Returns a nested list of sketches per episode from a season"""
+    return {
+        f"season_{season}": [
+            get_nested_episode_sketches(db, episode)
+            for episode in models.Script.season_ranges[season - 1]
+        ]
+    }
+
+
+def get_formatted_sketch_body(
+    sketch: dict, detailed: bool = False
+) -> list[dict[str, str]]:
+    """Return lines of a sketch in detailed or default view"""
+    if detailed:
+        return [  # Breaks up each line's info.
+            {
+                "type": line.type,
+                "actor": line.actor,
+                "character": line.character,
+                "detail": line.detail
+            }
+            for line in sketch
+        ]
+    else:
+        return [  # Condense into one line depending on dialogue or direction.
+            f"{line.character}: {line.detail}"
+            if (line.type == "Dialogue") else
+            f"*{line.detail}*"
+            for line in sketch
+        ]
 

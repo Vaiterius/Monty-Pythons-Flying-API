@@ -22,6 +22,11 @@ class Script(Base):
     record_date = Column(DateTime)
     series = Column(String)
     transmission_date = Column(DateTime)
-
-    nested_sketches: dict|None = None  # Store upon first request.
+    
+    season_ranges = [
+        range(1, 14),
+        range(14, 27),
+        range(27, 40),
+        range(40, 46),
+    ]
 
