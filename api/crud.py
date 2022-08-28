@@ -1,11 +1,19 @@
 import random
 import difflib
-
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, query
 from sqlalchemy.sql import func
 
-from . import models
+from .models import Script
+
+
+def clamp(n: int|float, min: int|float, max: int|float):
+    """Clamps a number between two inclusive values"""
+    if n < min:
+        return min
+    elif n > max:
+        return max
+    return n
 
 
 ###############################################################################
@@ -14,32 +22,37 @@ from . import models
 
 def get_random_quote(
     db: Session, actor: str|None = None, episode: int|None = None,
-    sketch: str|None = None
+    sketch: str|None = None, min_length: int|None = None,
+    max_length: int|None = None
 ) -> dict:
-    """Search for a random quote with optional arguments.
-            
-    Args:
-        actor: Search by Monty Python actor.
-        episode: Search by episode.
-
-    Return:
-        dict: The random quote of actor or from episode if provided.
-    
-    Raises:
-        HTTPException: Could not find a quote queried for.
-
-    """
+    """Search for a random quote with optional arguments"""
     base_query = db.query(
-        models.Script).filter_by(type="Dialogue").order_by(func.random())
+        Script).filter_by(type="Dialogue").order_by(func.random())
     
     # Apply argument filters if given.
     filters = []
     if episode:
-        filters.append(models.Script.episode == str(episode))
+        filters.append(Script.episode == str(episode))
     if actor:
-        filters.append(models.Script.actor.like(actor))
+        filters.append(Script.actor.like(actor))
     if sketch:
-        filters.append(models.Script.segment.like(sketch))
+        NUM_MATCHES_ALLOWED: int = 1
+        CUTOFF: float = 0.5
+        sketches: list[str] = get_all_sketches(db)
+        closest_match = difflib.get_close_matches(
+            sketch, sketches, NUM_MATCHES_ALLOWED, CUTOFF)
+        if closest_match:
+            sketch = closest_match[0]
+        filters.append(Script.segment.like(sketch))
+    
+    MAX_SIZE = 9223372036854775807  # Clamp size to prevent overflow.
+    MIN_SIZE = 1
+    if min_length:
+        min_length = clamp(min_length, MIN_SIZE, MAX_SIZE)
+        filters.append(func.length(Script.detail) >= min_length)
+    if max_length:
+        max_length = clamp(max_length, MIN_SIZE, MAX_SIZE)
+        filters.append(func.length(Script.detail) <= max_length)
     quote = base_query.filter(*filters).first()
 
     if not quote:
@@ -49,6 +62,7 @@ def get_random_quote(
         "episode": quote.episode,
         "sketch": quote.segment,
         "actor": quote.actor,
+        "character": quote.character,
         "quote": quote.detail,
     }
 
@@ -58,28 +72,27 @@ def get_random_quote(
 ###############################################################################
 
 def get_actors(db: Session) -> list[str]:
-    """Return a list of actors from the show"""
+    """Return a list of all the actors from the show"""
     return [
         actor.actor for actor in
         (
-            db.query(models.Script.actor)
-            .filter(models.Script.actor.isnot(None))
-            .group_by(models.Script.actor)
-            .order_by(func.count(models.Script.detail).desc())
+            db.query(Script.actor).filter(Script.actor.isnot(None))
+                                  .group_by(Script.actor)
+                                  .order_by(func.count(Script.detail).desc())
         )
         
     ]
 
 
 def get_characters(db: Session) -> list[str]:
-    """Return a list of characters played in the show"""
+    """Return a list of all the characters played in the show"""
     return [
         character.character for character in
         (
-            db.query(models.Script.character)
-              .filter(models.Script.character.isnot(None))
-              .group_by(models.Script.character)
-              .order_by(func.count(models.Script.detail).desc())
+            db.query(Script.character).filter(Script.character.isnot(None))
+                                      .group_by(Script.character)
+                                      .order_by(func.count(Script.detail)
+                                      .desc())
         )
     ]
 
@@ -92,19 +105,7 @@ def get_characters(db: Session) -> list[str]:
 def get_sketch(
     db: Session, sketch: str|None = None, detailed: bool = False
 ) -> dict[str, str|list[str]]:
-    """Return a sketch's lines and directions.
-        
-    Args:
-        sketch: Include name of sketch.
-        detailed: View more details of each line of sketch.
-
-    Returns:
-        dict: The lines and info of a particular sketch.
-    
-    Raises:
-        HTTPException: Searched-for sketch does not exist.
-
-    """
+    """Return a sketch's lines and directions"""
     choice: str|None = sketch
 
     # Query random sketch if no sketch is provided.
@@ -121,16 +122,16 @@ def get_sketch(
         if closest_match:
             choice = closest_match[0]
     
-    sketch = db.query(models.Script).filter(models.Script.segment.like(choice))
+    sketch = db.query(Script).filter(Script.segment.like(choice))
 
     # Sketch doesn't exist.
     if not sketch.first():
         raise HTTPException(status_code=404, detail="Sketch not found")
     
     return {
-        "sketch": sketch.first().segment,
         "episode": sketch.first().episode,
         "episode_name": sketch.first().episode_name,
+        "sketch": sketch.first().segment,
         "body": get_formatted_sketch_body(sketch, detailed=detailed)
     }
 
@@ -138,28 +139,17 @@ def get_sketch(
 def get_episode(
     db: Session, number: int|None = None, detailed: bool = False
 ) -> dict[str, str|list[dict[str, str|list[str]]]]:
-    """Search an episode by argument or random if not provided.
-
-    Args:
-        number: Search episode by its number.
-        detailed: View more detail of lines of each episode's sketch.
-
-    Returns:
-        dict: The episode's info along with its sketches' lines.
-    
-    Raises:
-        HTTPException: Searched episode could not be found.
-    
-    """
+    """Search an episode by argument or random if not provided"""
     episode_name: str|None = None
 
     # Query random episode if no episode number is provided.
     query = None
     if number:
-        query = db.query(models.Script).filter(models.Script.episode == str(number))
+        number = clamp(number, 1, 45)
+        query = db.query(Script).filter(Script.episode == number)
     else:
         number = random.randint(1, 45)
-        query = db.query(models.Script).filter(models.Script.episode == number)
+        query = db.query(Script).filter(Script.episode == number)
     
     # Episode not found.
     if not query.first():
@@ -175,12 +165,12 @@ def get_episode(
     for sketch_name in sketches:
         sketch = None
         if not sketch_name:
-            sketch = (db.query(models.Script).filter_by(episode=number)
-                                   .filter(models.Script.segment
+            sketch = (db.query(Script).filter_by(episode=number)
+                                   .filter(Script.segment
                                    .is_(None)))
         else:
-            sketch = (db.query(models.Script).filter_by(episode=number)
-                                         .filter(models.Script.segment
+            sketch = (db.query(Script).filter_by(episode=number)
+                                         .filter(Script.segment
                                          .like(sketch_name)))
         # Insert the lines belonging to a sketch.
         body.append(
@@ -200,24 +190,14 @@ def get_episode(
 def get_nested_seasons(
     db: Session, season: int|None = None
 ) -> dict[str: dict[str, list[str]]]:
-    """Return nested sketches based on their season and episode.
-    
-    Args:
-        season: Select from seasons 1 to 4.
-        episode: Select a specific episode number from a particular season.
-    
-    Returns:
-        dict: The show's hierarchy in season->episode->sketch form.
-    
-    Raises:
-        HTTPException: Season or episode # passed in was not valid.
-    
-    """
+    """Return nested sketches based on their season and episode"""
+    # Retrieving a specific season.
     if season:
         if season not in [1, 2, 3, 4]:
             raise HTTPException(status_code=404, detail="Season not found")
         return get_nested_season_sketches(db, season)
     
+    # Fetch every season.
     all_season_sketches = {}
     for season in [1, 2, 3, 4]:
         all_season_sketches.update(get_nested_season_sketches(db, season))
@@ -228,19 +208,18 @@ def get_nested_seasons(
 
 def get_all_sketches(db: Session, season: int|None = None) -> list[str]:
     """Return list of every sketch in the show, optional from a season"""
-    base_query = (db.query(models.Script.segment)
-                  .distinct(models.Script.segment)
-                  .filter(models.Script.segment.isnot(None)))
+    base_query = (db.query(Script.segment).distinct(Script.segment)
+                                          .filter(Script.segment.isnot(None)))
     
     if season:  # Filter only sketches from the season.
         if season not in [1, 2, 3, 4]:
             raise HTTPException(status_code=404, detail="Season out of range")
         
         # Fetch sketches that fall into the episodes from the season.
-        lower = models.Script.season_ranges[season - 1][0]
-        upper = models.Script.season_ranges[season - 1][-1]
+        lower = Script.season_ranges[season - 1][0]
+        upper = Script.season_ranges[season - 1][-1]
         base_query = base_query.filter(
-            models.Script.episode.between(lower, upper))
+            Script.episode.between(lower, upper))
     
     return [sketch.segment for sketch in base_query]
 
@@ -252,10 +231,9 @@ def get_episode_sketches(db: Session, episode: int) -> list[str]:
 
     return [
         sketch.segment for sketch in
-        (db.query(models.Script.segment)
-                   .filter_by(episode=episode)
-                   .distinct(models.Script.segment)
-                   .filter(models.Script.segment.isnot(None)))
+        (db.query(Script.segment).filter_by(episode=episode)
+                                 .distinct(Script.segment)
+                                 .filter(Script.segment.isnot(None)))
     ]
 
 
@@ -271,18 +249,19 @@ def get_nested_episode_sketches(
     }
 
 
-def get_nested_season_sketches(db: Session, season: int) -> list[str]:
+def get_nested_season_sketches(
+    db: Session, season: int) -> dict[str, list[dict[str, list[str]]]]:
     """Returns a nested list of sketches per episode from a season"""
     return {
         f"season_{season}": [
             get_nested_episode_sketches(db, episode)
-            for episode in models.Script.season_ranges[season - 1]
+            for episode in Script.season_ranges[season - 1]
         ]
     }
 
 
 def get_formatted_sketch_body(
-    sketch: dict, detailed: bool = False
+    sketch: "query.Query[Script]", detailed: bool = False
 ) -> list[dict[str, str]]:
     """Return lines of a sketch in detailed or default view"""
     if detailed:
