@@ -184,7 +184,7 @@ def get_random_sketch(detailed: bool = False, db: Session = Depends(get_db)):
 
 @holy_api.get("/sketches/season/{season}", response_class=PrettyJSONResponse)
 @version(1)
-def get_all_sketches(
+def get_season_sketches(
     season: int, nested: bool = False, db: Session = Depends(get_db)
 ):
     """Get all sketches from a particular season.
@@ -212,7 +212,7 @@ def get_all_sketches(
 
 @holy_api.get("/sketches/episode/{episode}", response_class=PrettyJSONResponse)
 @version(1)
-def get_all_sketches(episode: int, db: Session = Depends(get_db)):
+def get_episode_sketches(episode: int, db: Session = Depends(get_db)):
     """Get all sketches from a particular episode.
     
     Args:
