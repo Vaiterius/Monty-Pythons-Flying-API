@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import FastAPI, Depends
 from fastapi_versioning import VersionedFastAPI, version
-from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -261,6 +261,12 @@ def get_sketch(
     return crud.get_sketch(db, sketch=sketch, detailed=detailed)
 
 
+# Wrap for API versioning.
+holy_api = VersionedFastAPI(
+    holy_api,
+    version_format="{major}", prefix_format="/v{major}",
+    enable_latest=True)
+
 # CORS support.
 holy_api.add_middleware(
     CORSMiddleware,
@@ -269,10 +275,3 @@ holy_api.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-
-
-# Wrap for API versioning.
-holy_api = VersionedFastAPI(
-    holy_api,
-    version_format="{major}", prefix_format="/v{major}",
-    enable_latest=True)
